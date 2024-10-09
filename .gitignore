@@ -1,4 +1,9 @@
 chat-*
+.env
+path/
+*.session
+russia.txt
+uzbekistan.txt
 
 # Logs
 logs
