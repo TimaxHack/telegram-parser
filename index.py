@@ -7,75 +7,60 @@ from telethon.errors import FloodWaitError
 
 load_dotenv()
 
-# Вводим данные сессии
+# Session data
 api_id = os.getenv('API_ID')
 api_hash = os.getenv('API_HASH')
 phone = os.getenv('PHONE')
 session_name = os.getenv('SESSION_NAME')
 output_file = os.getenv('OUTPUT_FILE')
-mongodb_uri = os.getenv('MONGODB_URI')  # URI для подключения к MongoDB
-provider_type = os.getenv('PROVIDER_TYPE', 'file')  # Определяем тип провайдера (по умолчанию 'file')
+mongodb_uri = os.getenv('MONGODB_URI')
+provider_type = os.getenv('PROVIDER_TYPE', 'mongodb')  # Изменено на 'mongodb' по умолчанию
 chats_id = [-1001512290359, -1001075858615, -165712385, -1002406932785]
 
-# Создаем клиент Telegram
+# Create the Telegram client
 client = TelegramClient(session_name, api_id, api_hash)
 
-
-# Базовый класс для хранения данных
 class StorageProvider:
-    """Базовый класс для хранения данных."""
-    
     async def load_messages(self, chat_id):
         raise NotImplementedError
 
     async def save_messages(self, messages, chat_id):
         raise NotImplementedError
 
+    async def load_last_message_id(self, chat_id):
+        return 0
 
-# Провайдер для хранения сообщений в файлах
-class FileProvider(StorageProvider):
-    """Провайдер для хранения сообщений в файлах."""
-    
-    def __init__(self, output_file):
-        self.output_file = output_file
-    
-    async def load_messages(self, chat_id):
-        file_path = f'chat-{abs(chat_id)}.txt'
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.readlines()
-        return []
+    async def save_last_message_id(self, chat_id, message_id):
+        raise NotImplementedError
 
-    async def save_messages(self, messages, chat_id):
-        file_path = f'chat-{abs(chat_id)}.txt'
-        with open(file_path, 'a', encoding='utf-8') as f:
-            f.writelines(messages)
+    async def save_chat_info(self, chat_id, title):
+        raise NotImplementedError
 
 
-# Провайдер для хранения сообщений в MongoDB
 class MongoDBProvider(StorageProvider):
-    """Провайдер для хранения сообщений в MongoDB."""
-    
     def __init__(self, mongodb_uri):
         self.client = MongoClient(mongodb_uri)
         self.db = self.client['telegram_db']
-        self.collection = self.db['messages']
-    
+        self.messages_collection = self.db['messages']
+        self.last_ids_collection = self.db['last_ids']
+        self.chats_collection = self.db['chats']
+
     async def load_messages(self, chat_id):
-        messages = self.collection.find({'chat_id': chat_id})
+        messages = self.messages_collection.find({'chat_id': chat_id})
         return [f"{msg['id']}|{msg['date']}|{msg['sender_id']}|{msg['text']}\n" for msg in messages]
-    
+
     async def save_messages(self, messages, chat_id):
         for message in messages:
             message_parts = message.split('|')
             message_id = int(message_parts[0])
             message_date = message_parts[1]
-            sender_id = int(message_parts[2])
-            text = message_parts[3]
-            
-            # Проверка на дубликаты сообщений
-            if not self.collection.find_one({'chat_id': chat_id, 'id': message_id}):
-                self.collection.insert_one({
+
+            sender_id_str = message_parts[2]
+            sender_id = int(sender_id_str) if sender_id_str != 'None' else None
+            text = message_parts[3] if len(message_parts) > 3 else 'No Text'
+
+            if not self.messages_collection.find_one({'chat_id': chat_id, 'id': message_id}):
+                self.messages_collection.insert_one({
                     'chat_id': chat_id,
                     'id': message_id,
                     'date': message_date,
@@ -83,92 +68,74 @@ class MongoDBProvider(StorageProvider):
                     'text': text
                 })
 
+    async def load_last_message_id(self, chat_id):
+        last_id_entry = self.last_ids_collection.find_one({'chat_id': chat_id})
+        return last_id_entry['last_message_id'] if last_id_entry else 0
 
-# Функция для выбора провайдера
+    async def save_last_message_id(self, chat_id, message_id):
+        self.last_ids_collection.update_one(
+            {'chat_id': chat_id},
+            {'$set': {'last_message_id': message_id}},
+            upsert=True
+        )
+
+    async def save_chat_info(self, chat_id, title):
+        if not self.chats_collection.find_one({'chat_id': chat_id}):
+            self.chats_collection.insert_one({
+                'chat_id': chat_id,
+                'title': title
+            })
+
+
 def get_storage_provider(provider_type):
-    if provider_type == 'file':
-        return FileProvider(output_file)
-    elif provider_type == 'mongodb':
+    if provider_type == 'mongodb':
         return MongoDBProvider(mongodb_uri)
     else:
-        raise ValueError(f"Неподдерживаемый тип провайдера хранения: {provider_type}")
+        raise ValueError(f"Unsupported storage provider type: {provider_type}")
 
 
-# Функция для загрузки чатов
-async def fetch_chat_messages(chat_id, provider_type='file', batch_size=50):
+async def fetch_chat_messages(chat_id, provider_type='mongodb', batch_size=50):
     storage_provider = get_storage_provider(provider_type)
-
     await client.start(phone)
 
-    # Загружаем существующие сообщения через провайдер
-    existing_messages = await storage_provider.load_messages(chat_id)
-    existing_message_ids = {msg.split('|')[0] for msg in existing_messages}
+    # Сохранение информации о чате
+    chat = await client.get_entity(chat_id)
+    await storage_provider.save_chat_info(chat.id, chat.title)
+
+    last_fetched_id = await storage_provider.load_last_message_id(chat_id)
 
     new_messages = []
     total_new_messages = 0
 
-    # Итерация по сообщениям
-    async for message in client.iter_messages(chat_id):
-        if str(message.id) not in existing_message_ids:
-            new_messages.append(f"{message.id}|{message.date}|{message.sender_id}|{message.text}\n")
+    async for message in client.iter_messages(chat_id, min_id=last_fetched_id):
+        text = message.text.replace('|', ', ') if message.text is not None else 'No Text'
+        new_messages.append(f"{message.id}|{message.date}|{message.sender_id}|{text}\n")
 
         if len(new_messages) >= batch_size:
             await storage_provider.save_messages(new_messages, chat_id)
             total_new_messages += len(new_messages)
-            print(f"Добавлено новых сообщений: {len(new_messages)}")
             new_messages = []
 
-        try:
-            await asyncio.sleep(0)
-        except FloodWaitError as e:
-            print(f"Слишком много запросов. Ожидание {e.seconds} секунд.")
-            await asyncio.sleep(e.seconds)
+        last_fetched_id = message.id
 
     if new_messages:
         await storage_provider.save_messages(new_messages, chat_id)
         total_new_messages += len(new_messages)
-        print(f"Добавлено новых сообщений: {len(new_messages)}")
 
-    print(f"Всего новых сообщений добавлено: {total_new_messages}")
+    if last_fetched_id is not None:
+        await storage_provider.save_last_message_id(chat_id, last_fetched_id)
 
-
-# Функция для получения списка диалогов
-async def fetch_dialogs():
-    dialogs_list = []
-    with open(output_file, 'w', encoding='utf-8') as f:
-        while True:
-            try:
-                async for dialog in client.iter_dialogs(limit=None):
-                    dialogs_list.append(dialog)
-                    output_line = f"Название: {dialog.title}, ID: {dialog.id}, Тип: {type(dialog.entity).__name__}\n"
-                    f.write(output_line)
-                    print(output_line.strip())
-
-                break
-            except FloodWaitError as e:
-                print(f"Слишком много запросов. Ожидание {e.seconds} секунд.")
-                await asyncio.sleep(e.seconds)
-            except Exception as e:
-                print(f"Произошла ошибка: {e}")
-                break
-
-    print(f"Всего загружено диалогов: {len(dialogs_list)}")
-    print(f"Вывод сохранен в файл: {output_file}")
+    print(f"Chat ID {chat_id}: Найдено новых сообщений: {total_new_messages}. Записано в БД: {total_new_messages}")
 
 
-# Основная функция (запуск основного сценария)
 async def main():
-    print('Запускаем основную функцию.')
+    print('Запуск основной функции.')
     await client.start(phone)
 
-    print('Запускаем функцию для получения списка диалогов.')
-    await fetch_dialogs()
-
-    print('Запускаем функцию для загрузки сообщений.')
+    print('Получение сообщений чатов.')
     for chat_id in chats_id:
-        await fetch_chat_messages(chat_id, provider_type)  # Используем провайдер, указанный в окружении
+        await fetch_chat_messages(chat_id, provider_type)
 
 
-# Запуск клиента
 with client:
     client.loop.run_until_complete(main())
