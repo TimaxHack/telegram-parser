@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 import asyncio
 from telethon import TelegramClient
+from telethon import types  # Импортируем types из telethon
 from pymongo import MongoClient
 from telethon.errors import FloodWaitError
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -107,42 +108,52 @@ async def fetch_chat_messages(chat_id, provider_type='mongodb', batch_size=50):
     storage_provider = MongoDBProvider(mongodb_uri)
     await client.start(phone)
 
-    # Сохранение информации о чате
+    # Получение информации о чате
     chat = await client.get_entity(chat_id)
 
-    # Проверяем тип объекта chat
-    if hasattr(chat, 'title'):
-        title = chat.title or ''
+    # Проверка типа объекта и получение названия
+    if isinstance(chat, (types.Chat, types.Channel)):
+        title = chat.title or 'Нет названия'
+    elif isinstance(chat, types.User):
+        title = chat.first_name or 'Нет названия'  # Можно использовать имя пользователя
     else:
         title = 'Нет названия'
 
     await storage_provider.save_chat_info(chat.id, title, active=False)
 
     last_fetched_id = await storage_provider.load_last_message_id(chat_id)
+    print(f"Last fetched ID for chat {chat_id}: {last_fetched_id}")  # Для отладки
 
     new_messages = []
     total_new_messages = 0
 
+    # Получаем сообщения начиная с last_fetched_id
     async for message in client.iter_messages(chat_id, min_id=last_fetched_id):
+        if message.id <= last_fetched_id:
+            continue  # Пропускаем сообщение, если его ID меньше или равен последнему сохраненному
+
         text = message.text.replace('|', ', ') if message.text is not None else 'No Text'
         new_messages.append(f"{message.id}|{message.date}|{message.sender_id}|{text}\n")
 
         if len(new_messages) >= batch_size:
             await storage_provider.save_messages(new_messages, chat_id)
             total_new_messages += len(new_messages)
+            print(f"Saved {len(new_messages)} messages.")  # Для отладки
             new_messages = []
 
-        last_fetched_id = message.id
+        last_fetched_id = message.id  # Обновление ID последнего сообщения
 
     if new_messages:
         await storage_provider.save_messages(new_messages, chat_id)
         total_new_messages += len(new_messages)
+        print(f"Saved remaining {len(new_messages)} messages.")  # Для отладки
 
+    # Обновляем ID последнего сообщения в базе данных
     if last_fetched_id is not None:
         await storage_provider.save_last_message_id(chat_id, last_fetched_id)
+        print(f"Updated last fetched ID to: {last_fetched_id}")  # Для отладки
 
     print(f"Chat ID {chat_id}: Найдено новых сообщений: {total_new_messages}. Записано в БД: {total_new_messages}")
-
 
 async def main():
     print('Запуск основной функции.')
