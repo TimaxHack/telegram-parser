@@ -1,13 +1,22 @@
+## Install mongo
+ddocker run --name mongodb \
+  -e MONGO_INITDB_ROOT_USERNAME=admin \
+  -e MONGO_INITDB_ROOT_PASSWORD=pass \
+  -p 27017:27017 \
+  -d mongo:latest
+
 ## Create api key
 go https://my.telegram.org/auth
 
 # Create .env
 ```
-API_ID = 
-API_HASH = 
-PHONE = 
-SESSION_NAME = 
-OUTPUT_FILE = 
+API_ID = <YOUR_API_ID>
+API_HASH = <YOUR_API_HASH>
+PHONE = <YOUR_PHONE>
+SESSION_NAME = <HOW_YOU_WANT_TO_NAME_SESSION_FILE>
+OUTPUT_FILE = <HOW_YOU_WANT_TO_NAME_FILE_WITH_CHATS_LIST>
+MONGODB_URI = "mongodb://admin:pass@127.0.0.1:27017/?connectTimeoutMS=30000&socketTimeoutMS=30000"
+PROVIDER_TYPE = "mongodb"
 ```
 
 ## Start
