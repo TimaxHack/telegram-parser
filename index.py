@@ -4,6 +4,7 @@ import asyncio
 from telethon import TelegramClient
 from pymongo import MongoClient
 from telethon.errors import FloodWaitError
+from motor.motor_asyncio import AsyncIOMotorClient
 
 load_dotenv()
 
@@ -12,10 +13,9 @@ api_id = os.getenv('API_ID')
 api_hash = os.getenv('API_HASH')
 phone = os.getenv('PHONE')
 session_name = os.getenv('SESSION_NAME')
-output_file = os.getenv('OUTPUT_FILE')
 mongodb_uri = os.getenv('MONGODB_URI')
 provider_type = os.getenv('PROVIDER_TYPE', 'mongodb')  # Изменено на 'mongodb' по умолчанию
-chats_id = [-1001512290359, -1001075858615, -165712385, -1002406932785]
+# chats_id = [-1001512290359, -1001075858615, -165712385, -1002406932785]
 
 # Create the Telegram client
 client = TelegramClient(session_name, api_id, api_hash)
@@ -33,20 +33,25 @@ class StorageProvider:
     async def save_last_message_id(self, chat_id, message_id):
         raise NotImplementedError
 
-    async def save_chat_info(self, chat_id, title):
+    async def save_chat_info(self, chat_id, title, active):
+        raise NotImplementedError
+
+    async def get_active_chats(self):
         raise NotImplementedError
 
 
+from motor.motor_asyncio import AsyncIOMotorClient
+
 class MongoDBProvider(StorageProvider):
     def __init__(self, mongodb_uri):
-        self.client = MongoClient(mongodb_uri)
+        self.client = AsyncIOMotorClient(mongodb_uri)
         self.db = self.client['telegram_db']
         self.messages_collection = self.db['messages']
         self.last_ids_collection = self.db['last_ids']
         self.chats_collection = self.db['chats']
 
     async def load_messages(self, chat_id):
-        messages = self.messages_collection.find({'chat_id': chat_id})
+        messages = await self.messages_collection.find({'chat_id': chat_id}).to_list(length=None)
         return [f"{msg['id']}|{msg['date']}|{msg['sender_id']}|{msg['text']}\n" for msg in messages]
 
     async def save_messages(self, messages, chat_id):
@@ -59,8 +64,9 @@ class MongoDBProvider(StorageProvider):
             sender_id = int(sender_id_str) if sender_id_str != 'None' else None
             text = message_parts[3] if len(message_parts) > 3 else 'No Text'
 
-            if not self.messages_collection.find_one({'chat_id': chat_id, 'id': message_id}):
-                self.messages_collection.insert_one({
+            existing_message = await self.messages_collection.find_one({'chat_id': chat_id, 'id': message_id})
+            if not existing_message:
+                await self.messages_collection.insert_one({
                     'chat_id': chat_id,
                     'id': message_id,
                     'date': message_date,
@@ -69,38 +75,48 @@ class MongoDBProvider(StorageProvider):
                 })
 
     async def load_last_message_id(self, chat_id):
-        last_id_entry = self.last_ids_collection.find_one({'chat_id': chat_id})
+        last_id_entry = await self.last_ids_collection.find_one({'chat_id': chat_id})
         return last_id_entry['last_message_id'] if last_id_entry else 0
 
     async def save_last_message_id(self, chat_id, message_id):
-        self.last_ids_collection.update_one(
+        await self.last_ids_collection.update_one(
             {'chat_id': chat_id},
             {'$set': {'last_message_id': message_id}},
             upsert=True
         )
 
-    async def save_chat_info(self, chat_id, title):
-        if not self.chats_collection.find_one({'chat_id': chat_id}):
-            self.chats_collection.insert_one({
-                'chat_id': chat_id,
-                'title': title
-            })
+    async def save_chat_info(self, chat_id, title, active):
+        update_fields = {'title': title}
+        await self.chats_collection.update_one(
+            {'chat_id': chat_id},
+            {'$set': update_fields, '$setOnInsert': {'active': active}},
+            upsert=True
+        )
 
+    async def get_active_chats(self):
+        active_chats = await self.chats_collection.find({'active': True}).to_list(length=None)
+        return [chat['chat_id'] for chat in active_chats]
 
-def get_storage_provider(provider_type):
-    if provider_type == 'mongodb':
-        return MongoDBProvider(mongodb_uri)
-    else:
-        raise ValueError(f"Unsupported storage provider type: {provider_type}")
+    async def load_all_chats(self):
+        async for dialog in client.iter_dialogs():
+            await self.save_chat_info(dialog.id, dialog.title, active=False)
+
 
 
 async def fetch_chat_messages(chat_id, provider_type='mongodb', batch_size=50):
-    storage_provider = get_storage_provider(provider_type)
+    storage_provider = MongoDBProvider(mongodb_uri)
     await client.start(phone)
 
     # Сохранение информации о чате
     chat = await client.get_entity(chat_id)
-    await storage_provider.save_chat_info(chat.id, chat.title)
+
+    # Проверяем тип объекта chat
+    if hasattr(chat, 'title'):
+        title = chat.title or ''
+    else:
+        title = 'Нет названия'
+
+    await storage_provider.save_chat_info(chat.id, title, active=False)
 
     last_fetched_id = await storage_provider.load_last_message_id(chat_id)
 
@@ -132,9 +148,18 @@ async def main():
     print('Запуск основной функции.')
     await client.start(phone)
 
+    print('Сначала загрузим все чаты в коллекцию chats')
+    storage_provider = MongoDBProvider(mongodb_uri)
+    # await storage_provider.load_all_chats() # уже загружено в бд, обновлять не надо
+
+    print('Получение активных чатов')
+    active_chats = await storage_provider.get_active_chats()
+    print(f"Список активных чатов: {active_chats}")
+
     print('Получение сообщений чатов.')
-    for chat_id in chats_id:
+    for chat_id in active_chats:
         await fetch_chat_messages(chat_id, provider_type)
+
 
 
 with client:

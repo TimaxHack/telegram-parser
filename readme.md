@@ -18,6 +18,7 @@ source path/to/venv/bin/activate
 pip install telethon
 pip install python-dotenv
 pip install pymongo
+pip install motor
 
 python index.py
 ```
