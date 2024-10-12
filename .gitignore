@@ -2,6 +2,7 @@ chat-*
 .env
 path/
 *.session
+*.session-journal
 russia.txt
 uzbekistan.txt
 
