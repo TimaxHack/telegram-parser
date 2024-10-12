@@ -104,14 +104,22 @@ async def fetch_chat_messages(chat_id, batch_size=50):
 
     print(f"Получаем сообщения для чата {chat_id}, начиная с ID {last_fetched_id}...")
 
-    # Устанавливаем цикл для получения сообщений в пакетах
     async for message in client.iter_messages(chat_id, min_id=last_fetched_id, reverse=True):  # Важно - reverse=True!
         if message.id <= last_fetched_id:
             print(f"Пропускаем сообщение с ID {message.id}, так как оно уже сохранено")
             continue
 
+        # Обрабатываем текст сообщения
         text = message.text.replace('|', ', ') if message.text is not None else 'No Text'
-        new_messages.append(f"{message.id}|{message.date}|{message.sender_id}|{text}\n")
+
+        # Проверяем наличие медиа
+        media_path = None
+        if message.media:
+            media_path = await message.download_media(file="./media")  # Загружаем медиафайл
+            print(f"Медиа файл загружен в: {media_path}")
+
+        # Добавляем данные сообщения
+        new_messages.append(f"{message.id}|{message.date}|{message.sender_id}|{text}|{media_path}\n")
 
         print(f"Обработано сообщение ID {message.id} в чате {chat_id}")
 
@@ -137,7 +145,6 @@ async def fetch_chat_messages(chat_id, batch_size=50):
         print(f"Последний ID сообщения для чата {chat_id} обновлён в базе: {last_fetched_id}")
 
     print(f"В чате {chat_id} найдено и сохранено новых сообщений: {total_new_messages}")
-
 
 async def main():
     print('Запуск основного процесса...')

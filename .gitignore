@@ -1,6 +1,7 @@
 chat-*
 .env
 path/
+media/
 *.session
 *.session-journal
 russia.txt

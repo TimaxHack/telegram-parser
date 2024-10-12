@@ -29,6 +29,8 @@ pip install python-dotenv
 pip install pymongo
 pip install motor
 
+mkdir media
+
 python index.py
 ```
 
