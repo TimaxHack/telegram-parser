@@ -8,7 +8,7 @@ ddocker run --name mongodb \
 ## Create api key
 go https://my.telegram.org/auth
 
-# Create .env
+# Create .env and fill:
 ```
 API_ID = <YOUR_API_ID>
 API_HASH = <YOUR_API_HASH>
@@ -17,6 +17,8 @@ SESSION_NAME = <HOW_YOU_WANT_TO_NAME_SESSION_FILE>
 OUTPUT_FILE = <HOW_YOU_WANT_TO_NAME_FILE_WITH_CHATS_LIST>
 MONGODB_URI = "mongodb://admin:pass@127.0.0.1:27017/?connectTimeoutMS=30000&socketTimeoutMS=30000"
 PROVIDER_TYPE = "mongodb"
+DOWNLOAD_MEDIA_ENABLED = "True"
+DOWNLOAD_MEDIA_PATH = "./media"
 ```
 
 ## Start

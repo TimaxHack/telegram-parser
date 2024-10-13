@@ -14,6 +14,10 @@ phone = os.getenv('PHONE')
 session_name = os.getenv('SESSION_NAME')
 mongodb_uri = os.getenv('MONGODB_URI')
 
+# Добавляем конвертацию переменной в логическое значение
+download_media_enabled = os.getenv('DOWNLOAD_MEDIA_ENABLED', 'False').lower() in ['true', '1', 'yes']
+download_media_path = os.getenv('DOWNLOAD_MEDIA_PATH') or './media'
+
 client = TelegramClient(session_name, api_id, api_hash)
 
 class MongoDBProvider:
@@ -104,7 +108,7 @@ async def fetch_chat_messages(chat_id, batch_size=50):
 
     print(f"Получаем сообщения для чата {chat_id}, начиная с ID {last_fetched_id}...")
 
-    async for message in client.iter_messages(chat_id, min_id=last_fetched_id, reverse=True):  # Важно - reverse=True!
+    async for message in client.iter_messages(chat_id, min_id=last_fetched_id, reverse=True):
         if message.id <= last_fetched_id:
             print(f"Пропускаем сообщение с ID {message.id}, так как оно уже сохранено")
             continue
@@ -112,10 +116,10 @@ async def fetch_chat_messages(chat_id, batch_size=50):
         # Обрабатываем текст сообщения
         text = message.text.replace('|', ', ') if message.text is not None else 'No Text'
 
-        # Проверяем наличие медиа
+        # Проверяем наличие медиа, если загрузка включена
         media_path = None
-        if message.media:
-            media_path = await message.download_media(file="./media")  # Загружаем медиафайл
+        if download_media_enabled and message.media:
+            media_path = await message.download_media(file=download_media_path)  # Используем переменную пути
             print(f"Медиа файл загружен в: {media_path}")
 
         # Добавляем данные сообщения

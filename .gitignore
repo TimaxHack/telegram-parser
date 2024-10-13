@@ -4,6 +4,7 @@ path/
 media/
 *.session
 *.session-journal
+chats.txt
 russia.txt
 uzbekistan.txt
 
