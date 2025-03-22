@@ -1,0 +1,10 @@
+{
+    "filter_message_types": ["text", "photo", "jpg", "png", "pdf"],
+    "filter_keywords": ["вапотмвалпт"],
+    "filter_hashtags": [],
+    "filter_date_from": "2025-01-01 12:00:00",
+    "filter_date_to": "2025-03-24 01:55:00",
+    "filter_sender_ids": [],
+    "filter_max_file_size": 10485760,
+    "chats": []
+  }
