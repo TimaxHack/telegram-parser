@@ -7,6 +7,7 @@ from telethon import TelegramClient
 from telethon import types
 from motor.motor_asyncio import AsyncIOMotorClient
 import pytz
+from tzlocal import get_localzone
 
 load_dotenv()
 
@@ -84,7 +85,6 @@ class MongoDBProvider:
             await self.save_chat_info(dialog.id, dialog.title, active=False)
         print("Чаты загружены.")
 
-# Загрузка конфигурации из filters.json
 def load_filters():
     filters = {}
     try:
@@ -103,12 +103,31 @@ def load_filters():
             "chats": []
         }
 
-    moscow_tz = pytz.timezone('Europe/Moscow')
+    # Получаем локальный часовой пояс с помощью tzlocal
+    local_tz = get_localzone()
+    # Если local_tz — это ZoneInfo, преобразуем его в pytz-совместимый часовой пояс
+    if not hasattr(local_tz, 'localize'):
+        try:
+            local_tz = pytz.timezone(str(local_tz))
+        except pytz.exceptions.UnknownTimeZoneError:
+            print(f"Не удалось определить часовой пояс, используем UTC по умолчанию.")
+            local_tz = pytz.UTC
+    print(f"Используемый часовой пояс: {local_tz}")
+
+    # Логируем текущее время системы для проверки
+    current_time_local = datetime.now(local_tz)
+    current_time_utc = current_time_local.astimezone(pytz.UTC)
+    print(f"Текущее время системы (местное, {local_tz}): {current_time_local}")
+    print(f"Текущее время системы (UTC): {current_time_utc}")
+
     if "filter_date_from" in filters and filters["filter_date_from"]:
         try:
             dt = datetime.strptime(filters["filter_date_from"], '%Y-%m-%d %H:%M:%S')
-            dt = moscow_tz.localize(dt)
-            filters["filter_date_from"] = dt.astimezone(pytz.UTC)
+            print(f"filter_date_from (исходное, местное время): {dt}")
+            dt = local_tz.localize(dt)  # Привязываем к локальному часовому поясу
+            print(f"filter_date_from (после привязки к {local_tz}): {dt}")
+            filters["filter_date_from"] = dt.astimezone(pytz.UTC)  # Преобразуем в UTC
+            print(f"filter_date_from (в UTC): {filters['filter_date_from']}")
         except ValueError:
             print("Неверный формат даты в filter_date_from, игнорируем фильтр.")
             filters["filter_date_from"] = None
@@ -116,8 +135,11 @@ def load_filters():
     if "filter_date_to" in filters and filters["filter_date_to"]:
         try:
             dt = datetime.strptime(filters["filter_date_to"], '%Y-%m-%d %H:%M:%S')
-            dt = moscow_tz.localize(dt)
-            filters["filter_date_to"] = dt.astimezone(pytz.UTC)
+            print(f"filter_date_to (исходное, местное время): {dt}")
+            dt = local_tz.localize(dt)  # Привязываем к локальному часовому поясу
+            print(f"filter_date_to (после привязки к {local_tz}): {dt}")
+            filters["filter_date_to"] = dt.astimezone(pytz.UTC)  # Преобразуем в UTC
+            print(f"filter_date_to (в UTC): {filters['filter_date_to']}")
         except ValueError:
             print("Неверный формат даты в filter_date_to, игнорируем фильтр.")
             filters["filter_date_to"] = None
@@ -133,7 +155,7 @@ def load_filters():
 
     return filters
 
-# Функция для выгрузки сообщений из чата
+    # Функция для выгрузки сообщений из чата
 async def fetch_chat_messages(chat_id, filters, batch_size=50):
     storage_provider = MongoDBProvider(mongodb_uri)
 
@@ -184,24 +206,38 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
                 media_path = None
                 if download_media_enabled and should_download_media(group_msg, filters):
                     media_path = await group_msg.download_media(file=download_media_path)
+                    if media_path:
+                        print(f"Скачан медиафайл: {media_path}")
+                    else:
+                        print(f"Не удалось скачать медиа для сообщения {group_msg.id}")
                     if media_path and not is_valid_media_extension(media_path, filters):
+                        print(f"Медиафайл {media_path} удален: неподдерживаемое расширение")
                         os.remove(media_path)
                         media_path = None
 
                 sender_id = str(group_msg.sender_id) if group_msg.sender_id else 'None'
-                new_messages.append(f"{group_msg.id}|{group_msg.date}|{sender_id}|{text}|{media_path}")
+                message_entry = f"{group_msg.id}|{group_msg.date}|{sender_id}|{text}|{media_path}"
+                print(f"Сообщение прошло фильтр: {message_entry}")
+                new_messages.append(message_entry)
 
         elif not message.grouped_id:
             text = message.text.replace('|', ', ') if message.text else 'No Text'
             media_path = None
             if download_media_enabled and should_download_media(message, filters):
                 media_path = await message.download_media(file=download_media_path)
+                if media_path:
+                    print(f"Скачан медиафайл: {media_path}")
+                else:
+                    print(f"Не удалось скачать медиа для сообщения {message.id}")
                 if media_path and not is_valid_media_extension(media_path, filters):
+                    print(f"Медиафайл {media_path} удален: неподдерживаемое расширение")
                     os.remove(media_path)
                     media_path = None
 
             sender_id = str(message.sender_id) if message.sender_id else 'None'
-            new_messages.append(f"{message.id}|{message.date}|{sender_id}|{text}|{media_path}")
+            message_entry = f"{message.id}|{message.date}|{sender_id}|{text}|{media_path}"
+            print(f"Сообщение прошло фильтр: {message_entry}")
+            new_messages.append(message_entry)
 
         if len(new_messages) >= batch_size:
             await storage_provider.save_messages(new_messages, chat_id)
@@ -216,71 +252,6 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
         await storage_provider.save_last_message_id(chat_id, last_fetched_id)
 
 # Функции фильтрации
-def should_process_message(message, filters):
-    if not filters["filter_message_types"]:
-        return True
-
-    if filters["filter_date_from"]:
-        message_date = message.date.replace(microsecond=0)
-        filter_date_from = filters["filter_date_from"].replace(microsecond=0)
-        if message_date < filter_date_from:
-            return False
-
-    if filters["filter_date_to"]:
-        message_date = message.date.replace(microsecond=0)
-        filter_date_to = filters["filter_date_to"].replace(microsecond=0)
-        if message_date > filter_date_to:
-            return False
-
-    if filters["filter_sender_ids"] and message.sender_id not in filters["filter_sender_ids"]:
-        return False
-
-    if filters["filter_hashtags"] and message.text:
-        if not any(hashtag in message.text for hashtag in filters["filter_hashtags"]):
-            return False
-
-    if filters["filter_keywords"] and message.text:
-        if not any(keyword.lower() in message.text.lower() for keyword in filters["filter_keywords"]):
-            return False
-
-    if "text" in filters["filter_message_types"] and message.text:
-        return True
-
-    if "photo" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaPhoto):
-        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-            return False
-        return True
-
-    if "video" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and message.media.document.mime_type.startswith('video'):
-        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-            return False
-        return True
-
-    if "document" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and not message.media.document.mime_type.startswith('video'):
-        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-            return False
-        return True
-
-    if message.media:
-        if isinstance(message.media, types.MessageMediaPhoto):
-            for ext in filters["filter_message_types"]:
-                if ext in ["jpg", "jpeg", "png", "gif"] and ext in message.media.photo.mime_type.lower():
-                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-                        return False
-                    return True
-        elif isinstance(message.media, types.MessageMediaDocument):
-            for ext in filters["filter_message_types"]:
-                if message.media.document.mime_type.startswith('video') and ext in ["mp4", "mov", "avi"]:
-                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-                        return False
-                    return True
-                if not message.media.document.mime_type.startswith('video') and ext in ["pdf", "doc", "docx", "txt"]:
-                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
-                        return False
-                    return True
-
-    return False
-
 def should_download_media(message, filters):
     if not message.media:
         return False
@@ -350,6 +321,112 @@ def is_valid_media_extension(media_path, filters):
 
     return False
 
+def should_process_message(message, filters):
+    if not filters["filter_message_types"]:
+        return True
+
+    # Логируем дату сообщения
+    print(f"Дата сообщения (message.date, UTC): {message.date}")
+    # Преобразуем дату сообщения в местное время (Europe/Moscow) для удобства
+    local_tz = pytz.timezone('Europe/Moscow')  # Можно заменить на local_tz из load_filters
+    message_date_local = message.date.astimezone(local_tz)
+    print(f"Дата сообщения (местное время, {local_tz}): {message_date_local}")
+
+    if filters["filter_date_from"]:
+        message_date = message.date.replace(microsecond=0)
+        filter_date_from = filters["filter_date_from"].replace(microsecond=0)
+        print(f"Сравнение с filter_date_from: message_date={message_date}, filter_date_from={filter_date_from}")
+        if message_date < filter_date_from:
+            print(f"Сообщение отфильтровано: дата {message_date} раньше filter_date_from {filter_date_from}")
+            return False
+
+    if filters["filter_date_to"]:
+        message_date = message.date.replace(microsecond=0)
+        filter_date_to = filters["filter_date_to"].replace(microsecond=0)
+        print(f"Сравнение с filter_date_to: message_date={message_date}, filter_date_to={filter_date_to}")
+        if message_date > filter_date_to:
+            print(f"Сообщение отфильтровано: дата {message_date} позже filter_date_to {filter_date_to}")
+            return False
+
+    if filters["filter_sender_ids"] and message.sender_id not in filters["filter_sender_ids"]:
+        print(f"Сообщение отфильтровано: sender_id {message.sender_id} не в filter_sender_ids")
+        return False
+
+    if filters["filter_hashtags"] and message.text:
+        if not any(hashtag in message.text for hashtag in filters["filter_hashtags"]):
+            print(f"Сообщение отфильтровано: нет хэштегов {filters['filter_hashtags']} в тексте")
+            return False
+
+    if filters["filter_keywords"] and message.text:
+        if not any(keyword.lower() in message.text.lower() for keyword in filters["filter_keywords"]):
+            print(f"Сообщение отфильтровано: нет ключевых слов {filters['filter_keywords']} в тексте")
+            return False
+
+    if "text" in filters["filter_message_types"] and message.text:
+        return True
+
+    if "photo" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaPhoto):
+        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+            print("Сообщение отфильтровано: фото без текста, но есть фильтры по хэштегам или ключевым словам")
+            return False
+        return True
+
+    if "video" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and message.media.document.mime_type.startswith('video'):
+        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+            print("Сообщение отфильтровано: видео без текста, но есть фильтры по хэштегам или ключевым словам")
+            return False
+        return True
+
+    if "document" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and not message.media.document.mime_type.startswith('video'):
+        if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+            print("Сообщение отфильтровано: документ без текста, но есть фильтры по хэштегам или ключевым словам")
+            return False
+        return True
+
+    if message.media:
+        if isinstance(message.media, types.MessageMediaPhoto):
+            for ext in filters["filter_message_types"]:
+                if ext in ["jpg", "jpeg", "png", "gif"] and ext in message.media.photo.mime_type.lower():
+                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+                        print("Сообщение отфильтровано: фото без текста, но есть фильтры по хэштегам или ключевым словам")
+                        return False
+                    return True
+        elif isinstance(message.media, types.MessageMediaDocument):
+            for ext in filters["filter_message_types"]:
+                if message.media.document.mime_type.startswith('video') and ext in ["mp4", "mov", "avi"]:
+                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+                        print("Сообщение отфильтровано: видео без текста, но есть фильтры по хэштегам или ключевым словам")
+                        return False
+                    return True
+                if not message.media.document.mime_type.startswith('video') and ext in ["pdf", "doc", "docx", "txt"]:
+                    if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
+                        print("Сообщение отфильтровано: документ без текста, но есть фильтры по хэштегам или ключевым словам")
+                        return False
+                    return True
+
+    return False
+
+
+def is_valid_media_extension(media_path, filters):
+    if not media_path:
+        return True
+
+    if not filters["filter_message_types"]:
+        return True
+
+    for ext in filters["filter_message_types"]:
+        if ext in ["jpg", "jpeg", "png", "gif", "mp4", "mov", "avi", "pdf", "doc", "docx", "txt"] and media_path.endswith(ext):
+            return True
+
+    if "photo" in filters["filter_message_types"] and media_path.endswith(("jpg", "jpeg", "png", "gif")):
+        return True
+    if "video" in filters["filter_message_types"] and media_path.endswith(("mp4", "mov", "avi")):
+        return True
+    if "document" in filters["filter_message_types"] and media_path.endswith(("pdf", "doc", "docx", "txt")):
+        return True
+
+    return False
+
 # Главная функция
 async def main():
     if not await client.is_user_authorized():
@@ -362,7 +439,7 @@ async def main():
     await storage_provider.load_all_chats()
 
     filters = load_filters()
-    print(f"Загруженные фильтры: {filters}")
+    # print(f"Загруженные фильтры: {filters}")
 
     chat_ids = []
     try:
