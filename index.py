@@ -19,6 +19,10 @@ mongodb_uri = os.getenv('MONGODB_URI')
 download_media_enabled = os.getenv('DOWNLOAD_MEDIA_ENABLED', 'False').lower() in ['true', '1', 'yes']
 download_media_path = os.getenv('DOWNLOAD_MEDIA_PATH', './media')
 
+# Создаем папку для медиа, если она не существует
+if download_media_enabled and not os.path.exists(download_media_path):
+    os.makedirs(download_media_path)
+
 client = TelegramClient(session_name, api_id, api_hash)
 
 # Класс для работы с MongoDB
@@ -99,30 +103,25 @@ def load_filters():
             "chats": []
         }
 
-    # Проверяем и обрабатываем даты
-    moscow_tz = pytz.timezone('Europe/Moscow')  # Часовой пояс Москвы (UTC+3)
-
+    moscow_tz = pytz.timezone('Europe/Moscow')
     if "filter_date_from" in filters and filters["filter_date_from"]:
         try:
-            # Парсим дату как местное время (московское)
             dt = datetime.strptime(filters["filter_date_from"], '%Y-%m-%d %H:%M:%S')
-            dt = moscow_tz.localize(dt)  # Привязываем к московскому времени
-            filters["filter_date_from"] = dt.astimezone(pytz.UTC)  # Преобразуем в UTC
+            dt = moscow_tz.localize(dt)
+            filters["filter_date_from"] = dt.astimezone(pytz.UTC)
         except ValueError:
             print("Неверный формат даты в filter_date_from, игнорируем фильтр.")
             filters["filter_date_from"] = None
 
     if "filter_date_to" in filters and filters["filter_date_to"]:
         try:
-            # Парсим дату как местное время (московское)
             dt = datetime.strptime(filters["filter_date_to"], '%Y-%m-%d %H:%M:%S')
-            dt = moscow_tz.localize(dt)  # Привязываем к московскому времени
-            filters["filter_date_to"] = dt.astimezone(pytz.UTC)  # Преобразуем в UTC
+            dt = moscow_tz.localize(dt)
+            filters["filter_date_to"] = dt.astimezone(pytz.UTC)
         except ValueError:
             print("Неверный формат даты в filter_date_to, игнорируем фильтр.")
             filters["filter_date_to"] = None
 
-    # Устанавливаем пустые значения для отсутствующих ключей
     filters.setdefault("filter_message_types", [])
     filters.setdefault("filter_keywords", [])
     filters.setdefault("filter_hashtags", [])
@@ -142,12 +141,11 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
         chat = await client.get_entity(chat_id)
     except ValueError as e:
         print(f"Ошибка: Не удалось найти чат с ID {chat_id}. Причина: {e}")
-        return  # Пропускаем этот чат и продолжаем работу
+        return
     except Exception as e:
         print(f"Неизвестная ошибка при получении чата с ID {chat_id}: {e}")
-        return  # Пропускаем этот чат и продолжаем работу
+        return
 
-    # Проверяем тип сущности и выбираем подходящее поле для названия
     if isinstance(chat, (types.Chat, types.Channel)):
         title = chat.title
     elif isinstance(chat, types.User):
@@ -158,38 +156,33 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
 
     last_fetched_id = await storage_provider.get_last_message_id(chat_id)
     new_messages = []
-    processed_grouped_ids = set()  # Храним обработанные grouped_id, чтобы избежать дублирования
+    processed_grouped_ids = set()
 
     async for message in client.iter_messages(chat_id, min_id=last_fetched_id, reverse=True):
         if message.id <= last_fetched_id:
             continue
 
-        # Проверяем, является ли сообщение частью альбома
+        if not should_process_message(message, filters):
+            print(f"Сообщение {message.id} отфильтровано: date={message.date}, text={message.text}")
+            continue
+
         if message.grouped_id and message.grouped_id not in processed_grouped_ids:
-            # Это альбом, получаем все сообщения из группы
             group_messages = []
-            async for msg in client.iter_messages(chat_id, limit=100):  # Ограничиваем поиск, чтобы не сканировать весь чат
+            async for msg in client.iter_messages(chat_id, limit=100):
                 if msg.grouped_id == message.grouped_id:
                     group_messages.append(msg)
 
             print(f"Обнаружен альбом с grouped_id {message.grouped_id}, найдено {len(group_messages)} медиафайлов")
-            processed_grouped_ids.add(message.grouped_id)  # Отмечаем альбом как обработанный
+            processed_grouped_ids.add(message.grouped_id)
 
-            # Используем текст первого сообщения альбома для всех сообщений группы
             album_text = group_messages[0].text if group_messages and group_messages[0].text else 'No Text'
-
-            # Обрабатываем каждое сообщение из группы
             for group_msg in group_messages:
-                # Проверяем, проходит ли альбом фильтры, используя текст первого сообщения
-                modified_msg = group_msg
-                modified_msg.text = album_text  # Присваиваем текст альбома для проверки фильтров
-
-                if not should_process_message(modified_msg, filters):
+                if not should_process_message(group_msg, filters):
                     continue
 
-                text = album_text.replace('|', ', ')  # Используем текст альбома для записи
+                text = album_text.replace('|', ', ')
                 media_path = None
-                if download_media_enabled and should_download_media(modified_msg, filters):
+                if download_media_enabled and should_download_media(group_msg, filters):
                     media_path = await group_msg.download_media(file=download_media_path)
                     if media_path and not is_valid_media_extension(media_path, filters):
                         os.remove(media_path)
@@ -199,10 +192,6 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
                 new_messages.append(f"{group_msg.id}|{group_msg.date}|{sender_id}|{text}|{media_path}")
 
         elif not message.grouped_id:
-            # Это одиночное сообщение
-            if not should_process_message(message, filters):
-                continue
-
             text = message.text.replace('|', ', ') if message.text else 'No Text'
             media_path = None
             if download_media_enabled and should_download_media(message, filters):
@@ -228,91 +217,74 @@ async def fetch_chat_messages(chat_id, filters, batch_size=50):
 
 # Функции фильтрации
 def should_process_message(message, filters):
-    # Если фильтров нет, обрабатываем все сообщения
     if not filters["filter_message_types"]:
         return True
 
-    # Фильтр по датам
     if filters["filter_date_from"]:
-        # Игнорируем микросекунды для корректного сравнения
         message_date = message.date.replace(microsecond=0)
         filter_date_from = filters["filter_date_from"].replace(microsecond=0)
         if message_date < filter_date_from:
             return False
 
     if filters["filter_date_to"]:
-        # Игнорируем микросекунды для корректного сравнения
         message_date = message.date.replace(microsecond=0)
         filter_date_to = filters["filter_date_to"].replace(microsecond=0)
         if message_date > filter_date_to:
             return False
 
-    # Фильтр по отправителям
     if filters["filter_sender_ids"] and message.sender_id not in filters["filter_sender_ids"]:
         return False
 
-    # Проверяем хэштеги для всех сообщений, у которых есть текст
     if filters["filter_hashtags"] and message.text:
         if not any(hashtag in message.text for hashtag in filters["filter_hashtags"]):
             return False
 
-    # Проверяем ключевые слова для всех сообщений, у которых есть текст
     if filters["filter_keywords"] and message.text:
         if not any(keyword.lower() in message.text.lower() for keyword in filters["filter_keywords"]):
             return False
 
-    # Проверяем тип сообщения
     if "text" in filters["filter_message_types"] and message.text:
         return True
 
     if "photo" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaPhoto):
-        # Если хэштеги или ключевые слова указаны, но у фото нет текста, исключаем его
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return True
 
     if "video" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and message.media.document.mime_type.startswith('video'):
-        # Если хэштеги или ключевые слова указаны, но у видео нет текста, исключаем его
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return True
 
     if "document" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and not message.media.document.mime_type.startswith('video'):
-        # Если хэштеги или ключевые слова указаны, но у документа нет текста, исключаем его
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return True
 
-    # Проверяем конкретные форматы
     if message.media:
         if isinstance(message.media, types.MessageMediaPhoto):
             for ext in filters["filter_message_types"]:
                 if ext in ["jpg", "jpeg", "png", "gif"] and ext in message.media.photo.mime_type.lower():
-                    # Если хэштеги или ключевые слова указаны, но у фото нет текста, исключаем его
                     if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                         return False
                     return True
         elif isinstance(message.media, types.MessageMediaDocument):
             for ext in filters["filter_message_types"]:
                 if message.media.document.mime_type.startswith('video') and ext in ["mp4", "mov", "avi"]:
-                    # Если хэштеги или ключевые слова указаны, но у видео нет текста, исключаем его
                     if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                         return False
                     return True
                 if not message.media.document.mime_type.startswith('video') and ext in ["pdf", "doc", "docx", "txt"]:
-                    # Если хэштеги или ключевые слова указаны, но у документа нет текста, исключаем его
                     if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                         return False
                     return True
 
     return False
 
-
 def should_download_media(message, filters):
     if not message.media:
         return False
 
-    # Проверяем хэштеги и ключевые слова, если они указаны
     if filters["filter_hashtags"] and message.text:
         if not any(hashtag in message.text for hashtag in filters["filter_hashtags"]):
             return False
@@ -321,46 +293,37 @@ def should_download_media(message, filters):
         if not any(keyword.lower() in message.text.lower() for keyword in filters["filter_keywords"]):
             return False
 
-    # Если фильтров нет, скачиваем все медиа
     if not filters["filter_message_types"]:
         return filters["filter_max_file_size"] == 0 or message.media.document.size <= filters["filter_max_file_size"] if isinstance(message.media, types.MessageMediaDocument) else True
 
-    # Проверяем типы медиа
     if "photo" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaPhoto):
-        # Если хэштеги или ключевые слова указаны, но у фото нет текста, не скачиваем
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return True
 
     if "video" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and message.media.document.mime_type.startswith('video'):
-        # Если хэштеги или ключевые слова указаны, но у видео нет текста, не скачиваем
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return filters["filter_max_file_size"] == 0 or message.media.document.size <= filters["filter_max_file_size"]
 
     if "document" in filters["filter_message_types"] and isinstance(message.media, types.MessageMediaDocument) and not message.media.document.mime_type.startswith('video'):
-        # Если хэштеги или ключевые слова указаны, но у документа нет текста, не скачиваем
         if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
             return False
         return filters["filter_max_file_size"] == 0 or message.media.document.size <= filters["filter_max_file_size"]
 
-    # Проверяем конкретные форматы
     if isinstance(message.media, types.MessageMediaPhoto):
         for ext in filters["filter_message_types"]:
             if ext in ["jpg", "jpeg", "png", "gif"] and ext in message.media.photo.mime_type.lower():
-                # Если хэштеги или ключевые слова указаны, но у фото нет текста, не скачиваем
                 if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                     return False
                 return True
     elif isinstance(message.media, types.MessageMediaDocument):
         for ext in filters["filter_message_types"]:
             if message.media.document.mime_type.startswith('video') and ext in ["mp4", "mov", "avi"]:
-                # Если хэштеги или ключевые слова указаны, но у видео нет текста, не скачиваем
                 if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                     return False
                 return filters["filter_max_file_size"] == 0 or message.media.document.size <= filters["filter_max_file_size"]
             if not message.media.document.mime_type.startswith('video') and ext in ["pdf", "doc", "docx", "txt"]:
-                # Если хэштеги или ключевые слова указаны, но у документа нет текста, не скачиваем
                 if (filters["filter_hashtags"] or filters["filter_keywords"]) and not message.text:
                     return False
                 return filters["filter_max_file_size"] == 0 or message.media.document.size <= filters["filter_max_file_size"]
@@ -369,18 +332,15 @@ def should_download_media(message, filters):
 
 def is_valid_media_extension(media_path, filters):
     if not media_path:
-        return True  # Если фильтров нет, разрешаем все
+        return True
 
-    # Если фильтров нет, разрешаем все расширения
     if not filters["filter_message_types"]:
         return True
 
-    # Проверяем, есть ли конкретные форматы
     for ext in filters["filter_message_types"]:
         if ext in ["jpg", "jpeg", "png", "gif", "mp4", "mov", "avi", "pdf", "doc", "docx", "txt"] and media_path.endswith(ext):
             return True
 
-    # Если указаны только общие типы (photo, video, document), разрешаем все соответствующие форматы
     if "photo" in filters["filter_message_types"] and media_path.endswith(("jpg", "jpeg", "png", "gif")):
         return True
     if "video" in filters["filter_message_types"] and media_path.endswith(("mp4", "mov", "avi")):
@@ -399,21 +359,16 @@ async def main():
         print("Клиент уже авторизован.")
 
     storage_provider = MongoDBProvider(mongodb_uri)
-    print("Инициализация MongoDB клиента...")
-
     await storage_provider.load_all_chats()
-    print("Чаты загружены.")
 
     filters = load_filters()
     print(f"Загруженные фильтры: {filters}")
 
-    # Преобразуем chat_id из строк в целые числа
     chat_ids = []
     try:
         chat_ids = [int(chat_id) for chat_id in filters["chats"]] if filters["chats"] else await storage_provider.get_active_chats()
     except ValueError as e:
         print(f"Ошибка при преобразовании chat_id в число: {e}")
-        print("Пропускаем некорректные chat_id и пытаемся взять активные чаты из MongoDB...")
         chat_ids = await storage_provider.get_active_chats()
 
     print(f"Чаты для парсинга: {chat_ids}")
