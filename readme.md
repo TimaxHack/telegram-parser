@@ -30,7 +30,8 @@ pip install telethon
 pip install python-dotenv
 pip install pymongo
 pip install motor
-
+pip install pyz
+pip install tzlocal
 mkdir media
 
 python index.py
