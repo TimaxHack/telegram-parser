@@ -1,336 +1,314 @@
-Рад, что тебе в целом нравится предложенная архитектура! Я переработаю её, чтобы она больше соответствовала структуре и стилю, которые ты указал в своём примере. Вот обновлённая версия архитектуры системы интеграции Telegram с MCP, с акцентом на схемы Mermaid, чёткие потоки данных и подробное описание компонентов.
+Хорошо, я уберу всё лишнее и неподходящее из архитектуры, оставив только то, что соответствует нашим предыдущим обсуждениям. Мы фокусировались на парсинге Telegram для трейдинга, анализе новостей, генерации торговых сигналов и интеграции с ботами/AI агентами через Kafka, с использованием LangChain для кэширования и агентных структур, базового логирования и Docker Compose. Я исключу элементы, которые не связаны с этой задачей (например, сложные авторизации, Webhook, MinIO S3, TypeScript MCP сервер), и оставлю только релевантные компоненты.
 
 ---
 
-# Архитектура системы интеграции Telegram с MCP
+# Архитектура системы парсинга Telegram для трейдинга
 
 ## Схема архитектуры
-
-Ниже представлена общая схема системы, которая отражает взаимодействие компонентов в Docker Compose окружении:
 
 ```mermaid
 graph TD
     %% Внешние сервисы
-    TelegramAPI[Telegram API] --- |MTProto| TelegramService
-    LLM[Large Language Model] --- |HTTP/WS| MCPServer
+    TelegramAPI[Telegram API] --- |MTProto| TelegramParser
     
     subgraph "Docker Compose Окружение"
-        %% Telegram API Сервер
-        subgraph "Telegram API Сервер"
-            TelegramService[Django REST API]
-            CeleryWorker[Celery Worker]
-            CeleryBeat[Celery Beat]
-            
-            TelegramService --- |Tasks| CeleryWorker
-            TelegramService --- |Schedule| CeleryBeat
-            CeleryBeat --- |Scheduled Tasks| CeleryWorker
-        end
+        %% Telegram Parser
+        TelegramParser[Telegram Parser]
         
-        %% Базы данных и хранилища
-        PostgreSQL[(PostgreSQL)]
+        %% MCP Server
+        MCPServer[MCP Server]
+        
+        %% Trading Bot
+        TradingBot[Trading Bot]
+        
+        %% AI Agent
+        AIAgent[AI Agent]
+        
+        %% Базы данных и очереди
+        Kafka[(Kafka)]
         Redis[(Redis)]
-        MinIO[(MinIO S3)]
         
-        %% MCP Сервер
-        MCPServer[MCP TypeScript Server]
+        %% Связи
+        TelegramParser --- |Kafka: raw_data| Kafka
+        Kafka --- |Kafka: raw_data| MCPServer
+        MCPServer --- |Kafka: signals| Kafka
+        Kafka --- |Kafka: signals| TradingBot
+        TradingBot --- |Kafka: trades| Kafka
+        Kafka --- |Kafka: signals, trades| AIAgent
+        AIAgent --- |Kafka: portfolio_commands| Kafka
         
-        %% Связи внутри Docker Compose
-        TelegramService --- |SQL| PostgreSQL
-        TelegramService --- |Cache/Queue| Redis
-        CeleryWorker --- |Cache/Queue| Redis
-        CeleryBeat --- |Cache/Queue| Redis
-        TelegramService --- |S3 API| MinIO
-        CeleryWorker --- |S3 API| MinIO
-        
-        MCPServer --- |HTTP API| TelegramService
+        MCPServer --- |Cache| Redis
+        TradingBot --- |Cache| Redis
+        AIAgent --- |Cache| Redis
     end
-    
-    %% Опциональные внешние соединения
-    ExternalS3[(Внешнее S3 хранилище)]
-    TelegramService -.- |S3 API| ExternalS3
-    CeleryWorker -.- |S3 API| ExternalS3
     
     %% Стили
     classDef mainService fill:#f96,stroke:#333,stroke-width:2px
     classDef database fill:#6b8e23,stroke:#333,stroke-width:2px,color:white
     classDef external fill:#6495ed,stroke:#333,stroke-width:2px
-    classDef optional stroke-dasharray: 5 5
     
-    class TelegramService,MCPServer mainService
-    class PostgreSQL,Redis,MinIO database
-    class TelegramAPI,LLM,ExternalS3 external
-    class ExternalS3 optional
+    class TelegramParser,MCPServer,TradingBot,AIAgent mainService
+    class Kafka,Redis database
+    class TelegramAPI external
 ```
 
 ## Общий подход
 
-Система разделена на два основных компонента с чётким разделением ответственности:
+Система предназначена для:
+- Парсинга новостей из Telegram-чатов с фильтрацией.
+- Анализа данных (настроение, трендовые сигналы) в MCP Server.
+- Генерации торговых сигналов для ботов.
+- Управления портфелем через AI Agent.
+- Асинхронной передачи данных через Kafka.
 
-1. **Telegram API Сервер** — бэкенд на Django REST Framework (DRF), который:
-   - Взаимодействует с Telegram API через MTProto (с использованием Telethon).
-   - Предоставляет REST API для MCP Сервера.
-   - Обрабатывает асинхронные задачи (например, синхронизацию чатов) через Celery.
-
-2. **MCP Сервер** — прослойка на TypeScript, которая:
-   - Связывает LLM с Telegram API Сервером через HTTP API.
-   - Предоставляет инструменты для авторизации, работы с чатами, сообщениями и медиа.
-   - Использует LangChain для интеграции с LLM.
-
-Такой подход обеспечивает:
-- Надёжность и масштабируемость за счёт DRF и Celery.
-- Гибкость в управлении доступом LLM к Telegram через MCP.
-- Асинхронную обработку тяжёлых операций (например, загрузка медиа).
+Компоненты:
+1. **Telegram Parser** — собирает данные из Telegram и отправляет в Kafka.
+2. **MCP Server** — анализирует данные и генерирует сигналы.
+3. **Trading Bot** — выполняет сделки на основе сигналов.
+4. **AI Agent** — управляет портфелем с использованием LangChain.
 
 ---
 
 ## Потоки данных
 
-Потоки данных описывают ключевые сценарии взаимодействия между компонентами:
-
 ```mermaid
 sequenceDiagram
-    participant LLM as LLM
-    participant MCP as MCP Сервер
-    participant API as Telegram API Сервер
-    participant DB as PostgreSQL
-    participant S3 as MinIO/S3
-    participant Telegram as Telegram API
+    participant TP as Telegram Parser
+    participant K as Kafka
+    participant MCP as MCP Server
+    participant TB as Trading Bot
+    participant AI as AI Agent
+    participant R as Redis
     
-    %% Авторизация
-    LLM->>MCP: Запрос авторизации
-    MCP->>API: POST /auth/telegram
-    API->>Telegram: Запрос кода (Telethon)
-    Telegram-->>API: Код отправлен пользователю
-    API-->>MCP: Ожидание кода
-    MCP-->>LLM: Введите код
-    LLM->>MCP: Код подтверждения
-    MCP->>API: POST /auth/verify {code}
-    API->>Telegram: Подтверждение кода
-    Telegram-->>API: Сессия создана
-    API->>DB: Сохранение сессии
-    API-->>MCP: Сессия активна
-    MCP-->>LLM: Авторизация успешна
+    %% Парсинг данных
+    TP->>K: Отправка сообщения (raw_data)
+    K-->>MCP: Передача сообщения
     
-    %% Синхронизация чатов
-    LLM->>MCP: Синхронизировать чаты
-    MCP->>API: POST /sync/chats {chat_ids}
-    API->>Telegram: Получение чатов
-    Telegram-->>API: Список чатов
-    API->>DB: Сохранение метаданных
-    API->>API: Запуск Celery задачи
-    API->>Telegram: Получение сообщений
-    Telegram-->>API: Сообщения и медиа
-    API->>DB: Сохранение сообщений
-    API->>S3: Загрузка медиа
-    S3-->>API: URL медиа
-    API-->>MCP: Синхронизация выполняется
-    MCP-->>LLM: Статус синхронизации
+    %% Анализ и генерация сигналов
+    MCP->>R: Кэширование данных (LangChain)
+    MCP->>K: Отправка сигнала (signals)
+    K-->>TB: Передача сигнала
     
-    %% Чтение сообщений
-    LLM->>MCP: Получить сообщения из чата
-    MCP->>API: GET /chats/{id}/messages
-    API->>DB: Запрос сообщений
-    DB-->>API: Сообщения
-    API->>S3: Получение URL медиа
-    S3-->>API: URL медиа
-    API-->>MCP: Сообщения с URL
-    MCP-->>LLM: Форматированные данные
+    %% Выполнение сделки
+    TB->>R: Сохранение позиции
+    TB->>K: Отправка данных о сделке (trades)
     
-    %% Отправка сообщения
-    LLM->>MCP: Отправить сообщение
-    MCP->>API: POST /chats/{id}/messages {text}
-    API->>Telegram: Отправка сообщения
-    Telegram-->>API: Успех
-    API->>DB: Сохранение сообщения
-    API-->>MCP: Сообщение отправлено
-    MCP-->>LLM: Подтверждение
-```
-
----
-
-## Ключевые алгоритмы
-
-### 1. Алгоритм авторизации в Telegram
-
-```mermaid
-flowchart TD
-    Start([Начало]) --> CheckSession{Сессия\nсуществует?}
-    CheckSession -->|Да| LoadSession[Загрузить сессию]
-    CheckSession -->|Нет| RequestPhone[Запросить номер]
-    
-    LoadSession --> ValidateSession{Сессия\nвалидна?}
-    ValidateSession -->|Да| Success([Успех])
-    ValidateSession -->|Нет| RequestPhone
-    
-    RequestPhone --> SendCode[Отправить код]
-    SendCode --> WaitCode[Ожидать код]
-    WaitCode --> VerifyCode{Код\nверный?}
-    
-    VerifyCode -->|Да| Check2FA{2FA\nвключена?}
-    VerifyCode -->|Нет| ErrorCode[Ошибка кода]
-    ErrorCode --> WaitCode
-    
-    Check2FA -->|Да| RequestPassword[Запросить пароль]
-    Check2FA -->|Нет| SaveSession[Сохранить сессию]
-    
-    RequestPassword --> VerifyPassword{Пароль\nверный?}
-    VerifyPassword -->|Да| SaveSession
-    VerifyPassword -->|Нет| ErrorPassword[Ошибка пароля]
-    ErrorPassword --> RequestPassword
-    
-    SaveSession --> Success
-```
-
-### 2. Алгоритм синхронизации чатов
-
-```mermaid
-flowchart TD
-    Start([Начало]) --> GetConfig[Получить настройки]
-    GetConfig --> FilterChats{Фильтр\nчатов?}
-    
-    FilterChats -->|Все| FetchAll[Получить все чаты]
-    FilterChats -->|Выбранные| FetchSelected[Получить выбранные]
-    
-    FetchAll --> SaveMetadata[Сохранить метаданные]
-    FetchSelected --> SaveMetadata
-    
-    SaveMetadata --> QueueTasks[Создать задачи Celery]
-    QueueTasks --> SyncChat[Синхронизация чата]
-    
-    SyncChat --> FetchMessages[Получить сообщения]
-    FetchMessages --> SaveMessages[Сохранить в БД]
-    
-    SaveMessages --> HasMedia{Есть\nмедиа?}
-    HasMedia -->|Да| DownloadMedia[Загрузить медиа]
-    HasMedia -->|Нет| Complete
-    
-    DownloadMedia --> UploadS3[Сохранить в S3]
-    UploadS3 --> Complete([Завершено])
+    %% Управление портфелем
+    K-->>AI: Передача signals и trades
+    AI->>R: Кэширование (LangChain)
+    AI->>K: Отправка команд (portfolio_commands)
 ```
 
 ---
 
 ## Компоненты системы
 
-### 1. Telegram API Сервер (Django REST Framework)
+### 1. Telegram Parser
 
-#### Основные компоненты:
-- **Аутентификация и авторизация**:
-  - Поддержка авторизации через номер телефона или QR-код (Telethon).
-  - Сохранение сессий в PostgreSQL.
-  - API ключи для MCP Сервера.
-  - Permissions в DRF для контроля доступа.
+**Задача**: Парсинг сообщений из Telegram-чатов с фильтрацией и отправка в Kafka.
 
-- **Модуль синхронизации**:
-  - Импорт всех или выбранных чатов.
-  - Асинхронная синхронизация через Celery.
-  - Webhook или Long Polling для новых сообщений.
+**Библиотеки**:
+- `telethon==1.36.0` — работа с Telegram API.
+- `kafka-python==2.0.2` — отправка в Kafka.
+- `python-dotenv==1.0.1` — переменные окружения.
+- `loguru==0.7.2` — базовое логирование.
 
-- **База данных**:
-  - Модели: чаты, сообщения, пользователи, медиа, сессии.
-  - Хранение истории синхронизации.
+**Фильтры**:
+- **Максимальный размер файла**: `MAX_FILE_SIZE` (например, 10 МБ).
+- **Расширение файла**: Список расширений (`.jpg`, `.pdf`).
+- **Тип файла**: Фото, документы, видео (`message.media`).
+- **Поиск по хэштегам**: `#BTC`, `#ETH` (регулярные выражения).
+- **Поиск по ключевым словам**: "покупка", "рост".
+- **Парсинг коллажа фото**: Обработка `grouped_id`.
+- **Диапазон дат и времени**: `offset_date`.
+- **Список чатов**: `chat_ids` из конфига.
+- **От кого сообщение**: Фильтр по `sender_id`.
 
-- **Медиа обработчик**:
-  - Загрузка в MinIO или внешнее S3 (Boto3).
-  - Опциональное преобразование медиа.
-  - Кэширование в Redis.
-
-- **API Endpoints**:
-  - `GET /chats` — список чатов.
-  - `POST /sync/chats` — запуск синхронизации.
-  - `GET /chats/{id}/messages` — получение сообщений.
-  - `POST /chats/{id}/messages` — отправка сообщения.
-
-- **Throttling и безопасность**:
-  - Ограничение запросов через DRF Throttling.
-  - Фильтры по IP и User-Agent.
-  - Логирование с помощью `loguru`.
-
-#### Технический стек:
-- Django 5.1
-- Django REST Framework 3.15
-- Telethon 1.36
-- Celery 5.4 + Redis 5.0
-- PostgreSQL 16
-- Boto3 для S3
-- Pydantic 2.9 для валидации
-- OpenAPI для документации
-
-#### Фильтры для Telegram Parser:
-- Максимальный размер файла (`MAX_FILE_SIZE`).
-- Типы файлов (фото, видео, документы).
-- Ключевые слова и хэштеги.
-- Диапазон дат (`offset_date`).
-- Список чатов (`chat_ids`).
+**Реализация**:
+- Подключение через `Telethon`.
+- Итерация по чатам с фильтрацией сообщений.
+- Отправка в Kafka (`raw_data`):
+  ```json
+  {
+    "chat_id": 12345,
+    "message_id": 67890,
+    "text": "Покупаем BTC #crypto",
+    "date": "2023-10-01T12:00:00",
+    "sender_id": 98765,
+    "media": [{"type": "photo", "size": 1024, "extension": ".jpg"}]
+  }
+  ```
+- Логирование: `loguru` в файл `logs/telegram_parser.log`.
 
 ---
 
-### 2. MCP Сервер (TypeScript SDK)
+### 2. MCP Server
 
-#### Основные компоненты:
-- **Клиент Telegram API Сервера**:
-  - HTTP-запросы через Axios.
-  - Обработка ошибок и повторные попытки.
+**Задача**: Анализ данных, генерация сигналов, кэширование через LangChain.
 
-- **Инструменты MCP**:
-  - `telegram_auth` — авторизация.
-  - `telegram_chats` — управление чатами.
-  - `telegram_messages` — работа с сообщениями.
-  - `telegram_media` — обработка медиа.
-  - `telegram_search` — поиск.
-  - `telegram_monitor` — мониторинг.
+**Библиотеки**:
+- `kafka-python==2.0.2` — работа с Kafka.
+- `transformers==4.35.2` — анализ настроения (BERT).
+- `langchain==0.2.0` — кэширование и агенты.
+- `redis==5.0.8` — клиент Redis.
+- `loguru==0.7.2` — логирование.
 
-- **Менеджер инструментов**:
-  - Динамическая активация инструментов.
-  - Конфигурация через JSON.
+**Реализация**:
+- Чтение из `raw_data`.
+- Анализ настроения с `nlptown/bert-base-multilingual-uncased-sentiment`.
+- Кэширование в Redis через `langchain.cache`.
+- Генерация сигнала:
+  ```json
+  {
+    "symbol": "BTC/USDT",
+    "signal": "buy",
+    "sentiment": "positive",
+    "timestamp": "2023-10-01T12:00:00"
+  }
+  ```
+- Отправка в `signals`.
 
-- **Управление состоянием**:
-  - Кэширование в Redis через LangChain.js.
-  - Хранение истории запросов.
+---
 
-#### Технический стек:
-- TypeScript 5.5
-- Axios 1.7
-- Winston 3.14 для логирования
-- LangChain.js для LLM
+### 3. Trading Bot
+
+**Задача**: Выполнение сделок на основе сигналов.
+
+**Библиотеки**:
+- `kafka-python==2.0.2` — чтение из Kafka.
+- `ccxt==4.3.0` — работа с биржами.
+- `redis==5.0.8` — кэширование позиций.
+- `loguru==0.7.2` — логирование.
+
+**Реализация**:
+- Чтение из `signals`.
+- Выполнение ордеров через `ccxt`.
+- Сохранение позиций в Redis.
+- Отправка в `trades`:
+  ```json
+  {
+    "symbol": "BTC/USDT",
+    "action": "buy",
+    "price": 50000,
+    "quantity": 0.1
+  }
+  ```
+
+---
+
+### 4. AI Agent
+
+**Задача**: Управление портфелем.
+
+**Библиотеки**:
+- `kafka-python==2.0.2` — чтение/отправка в Kafka.
+- `langchain==0.2.0` — агенты и кэширование.
+- `redis==5.0.8` — кэш.
+- `loguru==0.7.2` — логирование.
+
+**Реализация**:
+- Чтение `signals` и `trades`.
+- Анализ через `langchain.agents`.
+- Отправка в `portfolio_commands`:
+  ```json
+  {
+    "action": "rebalance",
+    "symbol": "BTC/USDT",
+    "weight": 0.5
+  }
+  ```
 
 ---
 
 ## Хранение данных
 
-- **PostgreSQL**:
-  - Чаты, сообщения, пользователи, сессии.
+- **Kafka**:
+  - Темы: `raw_data`, `signals`, `trades`, `portfolio_commands`.
 - **Redis**:
-  - Кэш, очереди Celery.
-- **MinIO**:
-  - Локальное S3-хранилище для медиа.
-- **MCP Сервер**:
-  - Временный кэш и конфигурация.
+  - Кэш для MCP Server, Trading Bot, AI Agent.
 
 ---
 
-## Контейнеризация и развертывание
+## Контейнеризация
 
 ### Docker Compose
-- **Сервисы**:
-  - `telegram-api` (Django REST API).
-  - `celery-worker` и `celery-beat`.
-  - `mcp-server` (TypeScript).
-  - `postgres`, `redis`, `minio`.
-
-### Запуск
-```bash
-docker-compose up -d
+```yaml
+version: '3'
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    ports:
+      - "9092:9092"
+  redis:
+    image: redis:7.2
+    ports:
+      - "6379:6379"
+  telegram-parser:
+    build: ./telegram_parser
+  mcp-server:
+    build: ./mcp_server
+  trading-bot:
+    build: ./trading_bot
+  ai-agent:
+    build: ./ai_agent
 ```
 
 ---
 
-## Безопасность
+## Логирование
 
-- API ключи между MCP и Telegram API Сервером.
-- Throttling в DRF.
-- Базовое логирование (Winston и `loguru`).
+- **Loguru**: Логи в файлы (`logs/<service>.log`).
 
 ---
 
-Если что-то нужно доработать или уточнить, дай знать!
+## План реализации
+
+### Шаг 1: Переписать Telegram Parser
+1. Установить зависимости:
+   ```bash
+   pip install telethon==1.36.0 kafka-python==2.0.2 python-dotenv==1.0.1 loguru==0.7.2
+   ```
+2. Создать `.env`:
+   ```
+   API_ID=your_api_id
+   API_HASH=your_api_hash
+   CHAT_IDS=12345,67890
+   MAX_FILE_SIZE=10485760
+   ```
+3. Реализовать `telegram_parser.py` с фильтрами.
+4. Тестировать на тестовом чате.
+
+### Шаг 2: Создать заглушку MCP Server
+1. Установить:
+   ```bash
+   pip install kafka-python==2.0.2 loguru==0.7.2
+   ```
+2. Реализовать `mcp_server_stub.py`:
+   - Чтение из `raw_data`.
+   - Сохранение в `raw_data.jsonl`.
+3. Проверить работу с парсером.
+
+### Шаг 3: Доработать MCP Server
+1. Добавить зависимости:
+   ```bash
+   pip install transformers==4.35.2 langchain==0.2.0 redis==5.0.8
+   ```
+2. Реализовать анализ и сигналы.
+
+### Шаг 4: Реализовать Trading Bot
+1. Установить:
+   ```bash
+   pip install ccxt==4.3.0 kafka-python==2.0.2 redis==5.0.8 loguru==0.7.2
+   ```
+2. Реализовать выполнение сделок.
+
+### Шаг 5: Добавить AI Agent
+1. Установить:
+   ```bash
+   pip install langchain==0.2.0 kafka-python==2.0.2 redis==5.0.8 loguru==0.7.2
+   ```
+2. Реализовать управление портфелем.
+
+---
+
+Теперь всё строго соответствует нашим обсуждениям. Если что-то ещё убрать или уточнить, дай знать!
